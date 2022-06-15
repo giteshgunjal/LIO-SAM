@@ -1397,6 +1397,7 @@ public:
     void addGPSFactor()
     {
         if (gpsQueue.empty())
+            // ROS_INFO_STREAM("no gps, breaks skateboard");
             return;
 
         // wait for system initialized and settles down
