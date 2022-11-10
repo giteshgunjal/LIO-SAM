@@ -11,6 +11,8 @@
     <!--- Robot State TF -->
     <include file="$(find lio_sam)/launch/include/module_robot_state_publisher.launch" />
 
+    <node pkg="tf2_ros" type="static_transform_publisher" name="camera_link" args="0.127 0.0175 -0.1878 0.0 0.2714404 0 0.9624552 base_link camera_link" />
+
     <!--- Run Navsat -->
     <include file="$(find lio_sam)/launch/include/module_navsat.launch" />
 

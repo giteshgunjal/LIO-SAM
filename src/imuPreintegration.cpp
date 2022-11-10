@@ -28,7 +28,8 @@ public:
     ros::Subscriber subImuOdometry;
     ros::Subscriber subLaserOdometry;
 
-    ros::Publisher pubImuOdometry;
+    ros::Publisher pubImuOdometry1;
+    ros::Publisher pubImuPose;
     ros::Publisher pubImuPath;
 
     Eigen::Affine3f lidarOdomAffine;
@@ -59,7 +60,8 @@ public:
         subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry", 5, &TransformFusion::lidarOdometryHandler, this, ros::TransportHints().tcpNoDelay());
         subImuOdometry   = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental",   2000, &TransformFusion::imuOdometryHandler,   this, ros::TransportHints().tcpNoDelay());
 
-        pubImuOdometry   = nh.advertise<nav_msgs::Odometry>(odomTopic, 2000);
+        pubImuOdometry1   = nh.advertise<nav_msgs::Odometry>(odomTopic, 2000);
+        pubImuPose   = nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("imu_pose", 2000);
         pubImuPath       = nh.advertise<nav_msgs::Path>    ("lio_sam/imu/path", 1);
     }
 
@@ -118,7 +120,13 @@ public:
         laserOdometry.pose.pose.position.y = y;
         laserOdometry.pose.pose.position.z = z;
         laserOdometry.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(roll, pitch, yaw);
-        pubImuOdometry.publish(laserOdometry);
+        pubImuOdometry1.publish(laserOdometry);
+
+        // publish latest imu pose with cov
+        geometry_msgs::PoseWithCovarianceStamped imu_pose;
+        imu_pose.header = laserOdometry.header;
+        imu_pose.pose = laserOdometry.pose;
+        pubImuPose.publish(imu_pose);
 
         // publish tf
         static tf::TransformBroadcaster tfOdom2BaseLink;
@@ -183,6 +191,10 @@ public:
     gtsam::Vector3 prevVel_;
     gtsam::NavState prevState_;
     gtsam::imuBias::ConstantBias prevBias_;
+    Eigen::Matrix<double , 6,6> poseCovariance;
+    Eigen::Matrix<double , 6,6> tempCov;
+    // Eigen::Vector<float ,6> poseCovVector;
+    double begin;
 
     gtsam::NavState prevStateOdom;
     gtsam::imuBias::ConstantBias prevBiasOdom;
@@ -217,9 +229,11 @@ public:
         p->integrationCovariance    = gtsam::Matrix33::Identity(3,3) * pow(1e-4, 2); // error committed in integrating position from velocities
         gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6) << 0, 0, 0, 0, 0, 0).finished());; // assume zero initial bias
 
+        // priorPoseNoise  = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2).finished()); // rad,rad,rad,m, m, m
         priorPoseNoise  = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2).finished()); // rad,rad,rad,m, m, m
-        priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e4); // m/s
-        priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3); // 1e-2 ~ 1e-3 seems to be good
+
+        priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e4); // m/s  1e4
+        priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-2); // 1e-2 ~ 1e-3 seems to be good
         correctionNoise = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished()); // rad,rad,rad,m, m, m
         correctionNoise2 = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1, 1, 1, 1, 1, 1).finished()); // rad,rad,rad,m, m, m
         noiseModelBetweenBias = (gtsam::Vector(6) << imuAccBiasN, imuAccBiasN, imuAccBiasN, imuGyrBiasN, imuGyrBiasN, imuGyrBiasN).finished();
@@ -393,7 +407,18 @@ public:
         prevVel_   = result.at<gtsam::Vector3>(V(key));
         prevState_ = gtsam::NavState(prevPose_, prevVel_);
         prevBias_  = result.at<gtsam::imuBias::ConstantBias>(B(key));
-        // Reset the optimization preintegration object.
+
+        tempCov = optimizer.marginalCovariance(X(key));
+        poseCovariance.block<3,3>(0,0) = tempCov.block<3,3>(3,3);
+        poseCovariance.block<3,3>(3,3) = tempCov.block<3,3>(0,0);
+        poseCovariance.block<3,3>(0,3) = tempCov.block<3,3>(3,0);
+        poseCovariance.block<3,3>(3,0) = tempCov.block<3,3>(0,3);
+
+        // // poseCovVector
+
+        // cout<<"-------------"<<endl;
+        // cout<< "posecov1"<<poseCovariance<<endl;
+        // // Reset the optimization preintegration object.
         imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
         // check optimization
         if (failureDetection(prevVel_, prevBias_))
@@ -477,6 +502,18 @@ public:
 
         // predict odometry
         gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom);
+        Eigen::MatrixXd poseCovariance2 = imuIntegratorImu_->preintMeasCov(); 
+        // cout << "--------------"  << endl;
+        // double now = ros::Time::now().toSec(); 
+        // double period = now - begin;
+
+
+        
+        
+        // // cout << "pose" << prevStateOdom << endl;
+        // cout << "hz:" << endl;
+        // cout << now << endl << endl;
+        // begin = ros::Time::now().toSec();
 
         // publish odometry
         nav_msgs::Odometry odometry;
@@ -495,7 +532,17 @@ public:
         odometry.pose.pose.orientation.y = lidarPose.rotation().toQuaternion().y();
         odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
         odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
+
+
+        for (int i =0; i<6;i++){
+            for (int j =0; j<6;j++){
+            odometry.pose.covariance[i*6+j] = poseCovariance.coeff(i,j);
+            };
+        };
         
+        // cout << "psoecovimu"<<  odometry.pose.covariance << endl;
+        // odometry.pose.covariance[0] = poseCovariance.coeff(0,0);
+
         odometry.twist.twist.linear.x = currentState.velocity().x();
         odometry.twist.twist.linear.y = currentState.velocity().y();
         odometry.twist.twist.linear.z = currentState.velocity().z();
